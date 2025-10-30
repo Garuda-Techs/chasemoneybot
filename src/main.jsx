@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { initializeApp, getAnalytics } from 'firebase/app';
+import { initializeApp } from 'firebase/app';
+import { getAnalytics } from 'firebase/analytics';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, onSnapshot, collection, query, where, addDoc, updateDoc, arrayUnion, deleteDoc } from 'firebase/firestore';
+import { getFirestore, doc, onSnapshot, collection, query, addDoc, updateDoc, arrayUnion, deleteDoc } from 'firebase/firestore';
 import {
   Wallet,
   Users,
@@ -14,7 +15,7 @@ import {
   Loader2
 } from 'lucide-react';
 
-// --- Global Firebase Variables ---
+// --- Firebase Configuration ---
 const firebaseConfig = {
   apiKey: "AIzaSyBaRGydRzYv-fUFyccrRMxhJUOovIWhgW0",
   authDomain: "chasemoneybot.firebaseapp.com",
@@ -24,8 +25,13 @@ const firebaseConfig = {
   appId: "1:1050187592233:web:d6865b9efa8ddc80eba238",
   measurementId: "G-VZG5DVW9W3"
 };
-const appId = firebaseConfig.appId;
+
+// Initialize Firebase and export services
 const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+const db = getFirestore(app);
+const auth = getAuth(app);
+const appId = firebaseConfig.appId;
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // Helper to generate unique IDs
@@ -33,8 +39,6 @@ const generateUUID = () => crypto.randomUUID();
 
 // --- Main React Component ---
 const App = () => {
-  const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
   const [userId, setUserId] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -46,62 +50,41 @@ const App = () => {
   const [newGroupName, setNewGroupName] = useState('');
   const [newDebteeName, setNewDebteeName] = useState('');
 
-  // 1. Firebase Initialization and Authentication
+  // 1. Firebase Authentication
   useEffect(() => {
-    try {
-      if (Object.keys(firebaseConfig).length === 0) {
-        throw new Error("Firebase configuration is missing.");
-      }
-
-      const app = initializeApp(firebaseConfig);
-      getAnalytics(app); // Initialize Analytics
-      const firestoreDb = getFirestore(app);
-      const firebaseAuth = getAuth(app);
-
-      setDb(firestoreDb);
-      setAuth(firebaseAuth);
-
-      // Listen for auth state changes
-      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      try {
         if (!user) {
-          // If no user is signed in, sign in using the provided token or anonymously
           if (initialAuthToken) {
-            await signInWithCustomToken(firebaseAuth, initialAuthToken);
+            await signInWithCustomToken(auth, initialAuthToken);
           } else {
-            // Fallback to anonymous sign-in if no token is available
-            await signInAnonymously(firebaseAuth);
+            await signInAnonymously(auth);
           }
         }
-        // Set the userId and mark auth as ready
-        setUserId(firebaseAuth.currentUser?.uid || generateUUID());
+        setUserId(auth.currentUser?.uid || generateUUID());
         setIsAuthReady(true);
+      } catch (e) {
+        console.error("Firebase auth error:", e);
+        setError("Failed to authenticate with Firebase.");
+      } finally {
         setIsLoading(false);
-      });
+      }
+    });
 
-      return () => unsubscribe();
-    } catch (e) {
-      console.error("Firebase setup error:", e);
-      setError("Failed to initialize Firebase. Check console for details.");
-      setIsLoading(false);
-    }
+    return () => unsubscribe();
   }, []);
 
   // 2. Real-time Data Subscription (Firestore)
   useEffect(() => {
-    if (!db || !isAuthReady) return;
+    if (!isAuthReady) return;
 
-    // Path for public data: /artifacts/{appId}/public/data/debtGroups/{groupId}
     const groupsRef = collection(db, 'artifacts', appId, 'public', 'data', 'debtGroups');
     const groupsQuery = query(groupsRef);
 
     const unsubscribe = onSnapshot(groupsQuery, (snapshot) => {
-      const groups = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+      const groups = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDebtGroups(groups);
 
-      // If a group was selected but no longer exists, reset selection
       if (selectedGroupId && !groups.find(g => g.id === selectedGroupId)) {
         setSelectedGroupId(null);
       }
@@ -111,20 +94,19 @@ const App = () => {
     });
 
     return () => unsubscribe();
-  }, [db, isAuthReady, selectedGroupId]);
+  }, [isAuthReady, selectedGroupId]);
 
   // 3. Action Handlers
-
   const handleCreateGroup = useCallback(async (e) => {
     e.preventDefault();
-    if (!db || !newGroupName.trim()) return;
+    if (!newGroupName.trim()) return;
 
     try {
       const groupsRef = collection(db, 'artifacts', appId, 'public', 'data', 'debtGroups');
       await addDoc(groupsRef, {
         name: newGroupName.trim(),
         creatorId: userId,
-        debtees: [], // Start with an empty list
+        debtees: [],
         createdAt: new Date().toISOString(),
       });
       setNewGroupName('');
@@ -132,11 +114,11 @@ const App = () => {
       console.error("Error creating group:", e);
       setError("Could not create the debt group.");
     }
-  }, [db, userId, newGroupName]);
+  }, [userId, newGroupName]);
 
   const handleAddDebtee = useCallback(async (e) => {
     e.preventDefault();
-    if (!db || !selectedGroupId || !newDebteeName.trim()) return;
+    if (!selectedGroupId || !newDebteeName.trim()) return;
 
     try {
       const groupDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'debtGroups', selectedGroupId);
@@ -148,18 +130,16 @@ const App = () => {
         timestamp: new Date().toISOString(),
       };
 
-      await updateDoc(groupDocRef, {
-        debtees: arrayUnion(newDebtee)
-      });
+      await updateDoc(groupDocRef, { debtees: arrayUnion(newDebtee) });
       setNewDebteeName('');
     } catch (e) {
       console.error("Error adding debtee:", e);
       setError("Could not add the debtee to the group.");
     }
-  }, [db, selectedGroupId, newDebteeName, userId]);
+  }, [selectedGroupId, newDebteeName, userId]);
 
   const handleTogglePaid = useCallback(async (debteeId) => {
-    if (!db || !selectedGroupId) return;
+    if (!selectedGroupId) return;
 
     try {
       const groupDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'debtGroups', selectedGroupId);
@@ -171,28 +151,24 @@ const App = () => {
         d.id === debteeId ? { ...d, paid: !d.paid } : d
       );
 
-      await updateDoc(groupDocRef, {
-        debtees: updatedDebtees,
-      });
-
+      await updateDoc(groupDocRef, { debtees: updatedDebtees });
     } catch (e) {
       console.error("Error toggling paid status:", e);
       setError("Could not update the debtee status.");
     }
-  }, [db, selectedGroupId, debtGroups]);
+  }, [selectedGroupId, debtGroups]);
 
   const handleDeleteGroup = useCallback(async (groupId) => {
-    if (!db || !window.confirm("Are you sure you want to delete this debt group? This action cannot be undone.")) return;
+    if (!window.confirm("Are you sure you want to delete this debt group? This action cannot be undone.")) return;
 
     try {
       const groupDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'debtGroups', groupId);
       await deleteDoc(groupDocRef);
-
     } catch (e) {
       console.error("Error deleting group:", e);
       setError("Could not delete the debt group.");
     }
-  }, [db]);
+  }, []);
 
   const selectedGroup = useMemo(() => debtGroups.find(g => g.id === selectedGroupId), [debtGroups, selectedGroupId]);
 
